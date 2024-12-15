@@ -59,7 +59,8 @@ class NuPlanProcessor(object):
             "calib",
             "lidar",
             "dynamic_masks",
-            "objects"
+            "objects",
+            "trajectories"
         ],
         process_id_list=None,
         workers=64,
@@ -97,7 +98,8 @@ class NuPlanProcessor(object):
         )
         
         process_log_list = []
-        for idx in process_id_list:
+        # print(process_id_list, self.nuplandb_wrapper.log_names, self.nuplandb_wrapper.log_db_mapping.keys())
+        for idx in range(len(process_id_list)):
             process_log_list.append(self.nuplandb_wrapper.log_names[idx])
         self.process_log_list = process_log_list
         
@@ -112,8 +114,72 @@ class NuPlanProcessor(object):
             id_list = range(len(self))
         else:
             id_list = self.process_log_list
-        track_parallel_progress(self.convert_one, id_list, self.workers)
+        # track_parallel_progress(self.convert_one, id_list, self.workers)
+        for scene_id in id_list:
+            self.convert_one(scene_id)
         print("\nFinished ...")
+
+    def save_trajectory(self, log_db: NuPlanDB, lidar_idxs: List[int]):
+        """Parse and save the trajectory data.
+        
+        Args:
+            log_db (NuPlanDB): NuPlan database instance
+            lidar_idxs (List[int]): List of lidar frame indices to process
+            
+        The trajectory data includes:
+        - ego vehicle positions (x, y, z)
+        - ego vehicle orientations (quaternion)
+        - ego vehicle velocities
+        - timestamps
+        """
+        lidar_pcs = log_db.lidar_pc
+        trajectory_data = {
+            "positions": [],      # List of [x,y,z]
+            "orientations": [],   # List of [qw,qx,qy,qz] 
+            "velocities": [],     # List of [vx,vy,vz]
+            "timestamps": []      # List of timestamps
+        }
+        
+        for frame_idx, lidar_idx in enumerate(lidar_idxs):
+            if frame_idx >= self.max_frame_limit:
+                break
+                
+            lidar_pc = lidar_pcs[lidar_idx]
+            
+            # Get ego pose
+            ego_pose = get_egopose3d_for_lidarpc_token_from_db(
+                log_file=os.path.join(self.split_dir, log_db.log_name + '.db'),
+                token=lidar_pc.token
+            )
+            
+            # Extract position
+            position = ego_pose[:3, 3].tolist()
+            
+            # Convert rotation matrix to quaternion
+            rotation_matrix = ego_pose[:3, :3]
+            quat = Quaternion(matrix=rotation_matrix)
+            orientation = [quat.w, quat.x, quat.y, quat.z]
+            
+            # Get ego state for velocity
+            # ego_state = log_db.ego_state[lidar_idx]
+            # velocity = [
+            #     ego_state.velocity_x,
+            #     ego_state.velocity_y, 
+            #     ego_state.velocity_z
+            # ]
+            
+            # Add to trajectory data
+            trajectory_data["positions"].append(position)
+            trajectory_data["orientations"].append(orientation)
+            trajectory_data["velocities"].append(velocity)
+            trajectory_data["timestamps"].append(float(lidar_pc.timestamp))
+            
+        # Save trajectory data
+        trajectory_path = f"{self.save_dir}/{log_db.log_name}/trajectory.json"
+        with open(trajectory_path, 'w') as f:
+            json.dump(trajectory_data, f, indent=4)
+
+    
 
     def convert_one(self, scene_log_name):
         """Convert action for single file."""
@@ -170,6 +236,9 @@ class NuPlanProcessor(object):
             self.save_dynamic_mask(log_db, lidar_idxs, valid_classes=NUPLAN_NONRIGID_DYNAMIC_CLASSES, dir_name='human')
             self.save_dynamic_mask(log_db, lidar_idxs, valid_classes=NUPLAN_RIGID_DYNAMIC_CLASSES, dir_name='vehicle')
             print(f"Processed dynamic masks for {scene_log_name}")
+        if "trajectories" in self.process_keys:
+            self.save_trajectory(log_db, lidar_idxs)
+            print(f"Processed trajectory for {scene_log_name}")
         
         # process annotated objects
         if "objects" in self.process_keys:
@@ -398,6 +467,7 @@ class NuPlanProcessor(object):
                 if obj_id not in instances_info:
                     instances_info[obj_id] = {
                         "id": obj_id,
+                        "track_token": obj.track_token,
                         "class_name": obj.category,
                         "frame_annotations": {
                             "frame_idx": [],
@@ -506,7 +576,9 @@ class NuPlanProcessor(object):
             id_list = range(len(self))
         else:
             id_list = self.process_log_list
+        # print(self.process_log_list)
         for scene_log_name in id_list:
+            # print(self.save_dir, scene_log_name)
             if "images" in self.process_keys:
                 os.makedirs(f"{self.save_dir}/{scene_log_name}/images", exist_ok=True)
                 os.makedirs(f"{self.save_dir}/{scene_log_name}/sky_masks", exist_ok=True)
@@ -525,3 +597,5 @@ class NuPlanProcessor(object):
                 os.makedirs(f"{self.save_dir}/{scene_log_name}/instances", exist_ok=True)
                 if "objects_vis" in self.process_keys:
                     os.makedirs(f"{self.save_dir}/{scene_log_name}/instances/debug_vis", exist_ok=True)
+            if "trajectory" in self.process_keys:
+                os.makedirs(f"{self.save_dir}/{scene_log_name}/trajectory", exist_ok=True)

@@ -5,7 +5,7 @@ __pycache__/
 smpl_models/
 *.zip
 *.html
-
+/output
 # self added
 data/waymo
 data/pandaset
